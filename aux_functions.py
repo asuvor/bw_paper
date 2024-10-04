@@ -1,40 +1,110 @@
 import math 
-import os
-import re
-import pandas as pd
 import numpy as np
 import scipy
-import matplotlib.pyplot as plt
-import seaborn as sns
-import networkx as nx
+import os
+import re
 
 
-from aux_functions import *
+from concurrent.futures import ThreadPoolExecutor
+import logging
 from os import listdir
 from os.path import isfile, join
 from random import sample
-from scipy.spatial import distance
-from scipy.cluster import hierarchy as hc
-from scipy.linalg import sqrtm, block_diag, pinvh, eigh
-from numpy.linalg import inv, pinv
-from numpy.random import normal, poisson, randint
-from numpy import diagflat, eye, fill_diagonal, diag, sqrt
-from sklearn.utils import resample
- 
+from scipy.linalg import eigh
+from numpy.linalg import pinv
+from numpy import diagflat, eye, diag, sqrt, fill_diagonal
+
+
+from utls import *
 
 
 
 
 
-#------ Wasserstein part --------
+
+#---------------- Data generation and processing-------------
 
 
-def BW(K1, K2, method='numpy.eigh'):
+
+
+def genGLFast(mtx, P):
+    """
+    Generate GL, project it to the orthnormal basis P and invert
+    """
+    fill_diagonal(mtx, 0)
+    mtx = diagflat(mtx.sum(axis=1)) - mtx
+    mtx = P @ mtx @ P.T
+    return(pinv(mtx))
+
+
+
+
+
+
+def genWG(d, p11, p22, p12, lam11, lam22, lam12):
+    """
+    Generates a set of weighted graphs with two communities and Poisson-distributed weights.
+    
+    Parameters:
+    - d: Number of total nodes (default is 20).
+    - p11: Edge probability within community C11 (default is 0.8).
+    - p22: Edge probability within community C22 (default is 0.5).
+    - p12: Edge probability between communities C11 and C22 (default is 0.2).
+    - lam11: Lambda for Poisson distribution in C11 (default is 12).
+    - lam22: Lambda for Poisson distribution in C22 (default is 7).
+    - lam12: Lambda for Poisson distribution in C12 and C21 (default is 2).
+    
+    Returns:
+    - A weighted adjacency matrix representing the graph.
+    - The sizes of the two communities.
+    """
+    # Randomly determine the sizes of the two communities
+    size_C11 = int(np.floor(d/2)) + np.random.randint(-2, 2)  # Random number between 5 and 10
+    # size_C22 = d - size_C11  # The rest of the nodes are in C22
+    
+    # Initialize the adjacency matrix for the weighted graph
+    weighted_adjacency_matrix = np.zeros((d, d))
+    
+    # Fill in the edges for community C11 (intra-community)
+    for i in range(size_C11):
+        for j in range(i + 1, size_C11):
+            if np.random.rand() < p11:
+                weight = np.random.poisson(lam11)
+#                 weight = 2*(np.random.randint(6) + 4)
+                weighted_adjacency_matrix[i, j] = weighted_adjacency_matrix[j, i] = weight
+    
+    # Fill in the edges for community C22 (intra-community)
+    for i in range(size_C11, d):
+        for j in range(i + 1, d):
+            if np.random.rand() < p22:
+                weight = np.random.poisson(lam22)
+#                 weight = np.random.randint(9) + 6
+                weighted_adjacency_matrix[i, j] = weighted_adjacency_matrix[j, i] = weight
+    
+    # Fill in the edges between communities C11 and C22 (inter-community)
+    for i in range(size_C11):
+        for j in range(size_C11, d):
+            if np.random.rand() < p12:
+                weight = np.random.poisson(lam12)
+#                 weight = np.random.randint(4)
+                weighted_adjacency_matrix[i, j] = weighted_adjacency_matrix[j, i] = weight
+    
+    fill_diagonal(weighted_adjacency_matrix, 0)
+    
+    return weighted_adjacency_matrix
+
+
+
+
+
+#------ Wasserstein --------
+
+
+def BW(K1, K2):
     """Bures-Wasserstein distance"""
-    Q = sqrtm1(K1, method)
-    d = sqrt(np.maximum(0, K1.trace() + K2.trace() - 2 * sqrtm1(Q.dot(K2).dot(Q), method).trace()))
+    Q = sqrtm1(K1)
+    d = sqrt(np.maximum(0, K1.trace() + K2.trace() - 2 * sqrtm1(Q.dot(K2).dot(Q)).trace()))
     return d
-
 
 def Frob(K1, K2):
     """Frobenius distance"""
@@ -102,131 +172,52 @@ def Wbarycenter(covs, weights = None, eps = 1e-3, init = None, max_iterations = 
     return Q
 
 
+#------------------------- Bootstrap-----------------------
 
 
-#---------------- Data generation and processing-------------
-
-
-
-
-def genGLFast(mtx, P):
+def bootstrap(pop, size, iters, boot_samples):
     """
-    Generate GL, project it to the orthnormal basis P and invert
+    Выполняет процедуру бутстрэппинга для вычисления статистики.
+    
+    :param pop: Исходная популяция данных
+    :param size: Размер подвыборки
+    :param iters: Количество основных итераций
+    :param boot_samples: Количество бутстрэп-выборок на итерацию
+    :return: Сохранённый файл со статистикой бутстрэппинга
     """
-    fill_diagonal(mtx, 0)
-    mtx = diagflat(mtx.sum(axis=1)) - mtx
-    mtx = P @ mtx @ P.T
-    return(pinv(mtx))
-
-
-
-
-
-
-def genWG(d, p11, p22, p12, lam11, lam22, lam12):
-    """
-    Generates a set of weighted graphs with two communities and Poisson-distributed weights.
+    boot_stats = []  # Список для хранения результатов бутстрэппинга
     
-    Parameters:
-    - d: Number of total nodes (default is 20).
-    - p11: Edge probability within community C11 (default is 0.8).
-    - p22: Edge probability within community C22 (default is 0.5).
-    - p12: Edge probability between communities C11 and C22 (default is 0.2).
-    - lam11: Lambda for Poisson distribution in C11 (default is 12).
-    - lam22: Lambda for Poisson distribution in C22 (default is 7).
-    - lam12: Lambda for Poisson distribution in C12 and C21 (default is 2).
+    for it in range(iters):
+        logging.info(f"Итерация {it + 1}/{iters}")
+        iter_stats = []
+        
+        # Генерация подвыборки без замены
+        sample = subsmple(pop, size, repl=False)
+        
+        # Вычисление центральных элементов для эмпирической выборки
+        emp_bary = Fbarycenter(sample)
+        emp_wass = Wbarycenter(sample, init=emp_bary)
+        
+        for _ in range(boot_samples):
+            # Генерация весов для бутстрэп-выборки
+            weights = gen_weights(size)
+            
+            # Вычисление центральных элементов для бутстрэп-выборки
+            boot_bary = Fbarycenter(sample, weights)
+            boot_wass = Wbarycenter(sample, weights, init=boot_bary)
+            
+            # Вычисление статистики между эмпирической и бутстрэп-выборкой
+            wass_stat = BW(emp_wass, boot_wass) * np.sqrt(size)
+            iter_stats.append(wass_stat)
+        
+        boot_stats.append(iter_stats)
     
-    Returns:
-    - A weighted adjacency matrix representing the graph.
-    - The sizes of the two communities.
-    """
-    # Randomly determine the sizes of the two communities
-    size_C11 = int(np.floor(d/2)) + np.random.randint(-2, 2)  # Random number between 5 and 10
-    size_C22 = d - size_C11  # The rest of the nodes are in C22
-    
-    # Initialize the adjacency matrix for the weighted graph
-    weighted_adjacency_matrix = np.zeros((d, d))
-    
-    # Fill in the edges for community C11 (intra-community)
-    for i in range(size_C11):
-        for j in range(i + 1, size_C11):
-            if np.random.rand() < p11:
-                weight = np.random.poisson(lam11)
-#                 weight = 2*(np.random.randint(6) + 4)
-                weighted_adjacency_matrix[i, j] = weighted_adjacency_matrix[j, i] = weight
-    
-    # Fill in the edges for community C22 (intra-community)
-    for i in range(size_C11, d):
-        for j in range(i + 1, d):
-            if np.random.rand() < p22:
-                weight = np.random.poisson(lam22)
-#                 weight = np.random.randint(9) + 6
-                weighted_adjacency_matrix[i, j] = weighted_adjacency_matrix[j, i] = weight
-    
-    # Fill in the edges between communities C11 and C22 (inter-community)
-    for i in range(size_C11):
-        for j in range(size_C11, d):
-            if np.random.rand() < p12:
-                weight = np.random.poisson(lam12)
-#                 weight = np.random.randint(4)
-                weighted_adjacency_matrix[i, j] = weighted_adjacency_matrix[j, i] = weight
-    
-    np.fill_diagonal(weighted_adjacency_matrix, 0)
-    
-    return weighted_adjacency_matrix
+    # Формирование имени файла с использованием f-строки
+    filename = f'stat_bw_boot_d{np.shape(boot_wass)[0]}_n{size}_M{iters}_L_proj.npy'
+    np.save(filename, boot_stats)
+    logging.info(f"Результаты сохранены в файл: {filename}")
+    return boot_stats
 
-
-
-#
-def GetRepr(X, basis=None):
-    """
-    Compute the representation of a symmetric matrix X in a specific basis.
-    """
-    d = X.shape[0]
-    if basis is None:
-        g = d * (d + 1) // 2
-        y = np.zeros(g)
-        k = 0
-        for i in range(d):
-            for j in range(i + 1):
-                if i == j:
-                    y[k] = X[i, i]
-                else:
-                    y[k] = (X[i, j] + X[j, i]) / sqrt(2)
-                k += 1
-    else:
-        # If a basis is provided, use it to calculate the representation
-        g = len(basis)
-        y = np.zeros(g)
-        for i in range(g):
-            y[i] = np.sum(X * basis[i])
-    
-    return y
-
-
-def Reconstruct(y, basis=None):
-    """
-    Reconstruct the matrix from its representation y.
-    """
-    g = len(y)
-    d = int(np.floor(sqrt(2 * g)))
-    X = np.zeros((d, d))
-
-    if basis is None:
-        k = 0
-        for i in range(d):
-            for j in range(i + 1):
-                if i == j:
-                    X[i, i] = y[k]
-                else:
-                    X[i, j] = y[k] / sqrt(2)
-                    X[j, i] = y[k] / sqrt(2)
-                k += 1
-    else:
-        for i in range(g):
-            X += y[i] * basis[i]
-    
-    return X
 
 
 
@@ -300,10 +291,7 @@ def ComputeReprdT(Q, S=None, basis=None):
     q = sqrt(np.maximum(eigvals, 1e-7))
     r = np.ones(d)
     dummy = 1/(np.outer(q, r) + np.outer(r, q)) 
-    dummy /= (np.outer(q, r)*np.outer(r, q))
-#     dummy = np.nan_to_num(dummy, nan=0)
-#     dummy = 1 / (sqrt(eigvals)[:, None] + sqrt(eigvals)[None, :])
-#     dummy /= (sqrt(eigvals)[:, None] * sqrt(eigvals)[None, :])  
+    dummy /= (np.outer(q, r)*np.outer(r, q)) 
     repr_map = np.zeros((g, g))
     for i in range(g):
         A = -Deltas[i] * dummy
@@ -311,66 +299,6 @@ def ComputeReprdT(Q, S=None, basis=None):
             repr_map[i, j] = np.sum(A * Deltas[j])
     
     return repr_map
-
-
-def GenONbasisVec(d):
-    """ Генерация ортонормированного базиса """
-    vectors = []
-    for i in range(0, d-1):  
-        v = np.zeros(d)
-        v[i] = 1
-        v[-1] = -1
-        vectors.append(v)
-    
-    
-    # Метод Грамма-Шмидта
-    ortho_basis = []
-    
-    for v in vectors:
-        # Процесс ортогонализации: вычитаем проекции на уже найденные вектора
-        for u in ortho_basis:
-            v = v - np.dot(v, u) * u
-            
-        # Нормализация вектора
-        norm = np.linalg.norm(v)
-        if norm > 1e-10:  # Проверка, что вектор не нулевой
-            ortho_basis.append(v / norm)
-    
-    return np.array(ortho_basis)
-
-
-
-
-
-def GenONbasis(d):
-    """
-    Generate orthonormal basis in the space of d x d symmetric matrices.
-    
-    Parameters:
-    - d: Dimension of the matrix space.
-
-    Returns:
-    - A list of basis elements, each represented as a dictionary with 'count' and 'u' (the matrix).
-    """
-    out = []
-    counter = 0
-    
-    for i in range(d):
-        ei = np.zeros(d)
-        ei[i] = 1
-        for j in range(i + 1):
-            ej = np.zeros(d)
-            ej[j] = 1
-            counter += 1
-            
-            if i == j:
-                u_matrix = np.outer(ei, ei)
-            else:
-                u_matrix = (np.outer(ei, ej) + np.outer(ej, ei)) / sqrt(2)
-            
-            out.append({'count': counter, 'u': u_matrix})
-    
-    return out
 
 def GetOTmap(Q, S):
     """
@@ -396,7 +324,6 @@ def GetOTmap(Q, S):
     OT = D @ G @ D
     
     return OT
-
 
 def GetRepr(X, basis=None):
     """
@@ -465,5 +392,112 @@ def Reconstruct(y, basis=None):
 
 
 
-#------------------------- Aux functions -----------------------
+
+
+#------------------------Asymptotic distribution --------
+def compute_EdT(B, sample, basis):
+    """
+    Вычисляет представление EdT.
+    
+    :param B: Wasserstein barycenter
+    :param sample: sample
+    :param basis: basis
+    :return: EdT
+    """
+    d = np.shape(B)[0]
+    dim = d * (d + 1) // 2
+    dT = np.zeros((dim, dim))
+    for i in sample:
+        dT += ComputeReprdT(B,i, basis=basis)
+    
+    n = len(sample)
+    dT /= n
+    return dT
+
+def compute_var_T(B, sample, basis):
+    """
+    Вычисляет дисперсию T.
+    
+    :param B: Wasserstein расстояние выборки
+    :param sample: Подвыборка
+    :param basis: Базис
+    :return: Матрица дисперсии var_T
+    """
+    d = np.shape(B)[0]
+    dim = d * (d + 1) // 2
+    var_T = np.zeros((dim, dim))
+    identity = np.eye(B.shape[0])
+    for i in sample:
+        ot_map = GetOTmap(B, i)
+        vec_T = GetRepr(ot_map - identity, basis=basis)
+        var_T += np.outer(vec_T, vec_T)
+
+    n = len(sample)
+    var_T /= n
+    return var_T
+
+def compute_asymptotic(B, Q, upx, N, basis):
+    """
+    Вычисляет статистику Tt для бутстрэп-выборок.
+    
+    :param B: Wasserstein расстояние выборки
+    :param basis: Базис
+    :param upx_dummy: Корень из ковариационной матрицы
+    :param Qu: Представление T
+    :param g: Размерность базиса
+    :param N: Количество бутстрэп-выборок
+    :return: Список статистик Tt
+    """
+    stats = []
+    d = np.shape(B)[0]
+    dim = d * (d + 1) // 2
+    for _ in range(N):
+        Z = np.random.normal(0, 1, dim)
+        Z = Q @ upx @ Z
+        stat_value = np.linalg.norm(sqrtm1(B) @ Reconstruct(Z, basis=basis), 'fro')
+        stats.append(stat_value)
+    return stats
+
+def asymptotic_statistics(pop, size, iters, boot_samples):
+    """
+    Compute asymptotic distribution.
+
+    :param pop: Исходная популяция данных
+    :param size: Размер подвыборки
+    :param iters: Количество основных итераций
+    :param boot_samples: Количество бутстрэп-выборок на итерацию
+    """
+    basis = GenONbasis(np.shape(pop[0])[0])
+    stat_asymp = []
+    
+    for m in range(iters):
+        logging.info(f"Итерация {m + 1}/{iters}")
+    
+        
+        # Генерация подвыборки без замены
+        sub_sample = subsmple(pop, size, repl=False)
+        frob_emp  = Fbarycenter(sub_sample)
+        bw_emp = Wbarycenter(sub_sample, init=frob_emp)
+        
+    
+        # Вычисление dT и var_T
+        dT = compute_EdT(bw_emp, sub_sample, basis)
+        inv_dT = MInv(dT)
+        var_T = compute_var_T(bw_emp, sub_sample, basis)
+        
+        # Вычисление ковариации Uξ
+        upxi = inv_dT @ var_T @ inv_dT
+        sqrt_upxi = sqrtm1(upxi)
+        Qu = ComputeReprdT(bw_emp, basis=basis)
+        
+        # Вычисление статистики Tt
+        stat_rsmp = compute_asymptotic(bw_emp, Qu,  sqrt_upxi, boot_samples, basis)
+        stat_asymp.append(stat_rsmp)
+    
+    d = np.shape(bw_emp)[0]
+    # Сохранение результатов
+    filename = f'stat_bw_boot_d{d}_n{size}_M{boot_samples}_emp_L_proj.npy'
+    np.save(filename, stat_asymp)
+    logging.info(f"Результаты сохранены в файл: {filename}")
+    return stat_asymp
 
