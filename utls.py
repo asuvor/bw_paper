@@ -100,10 +100,9 @@ def GenONbasisVec(d):
 
 
 
-
 # Other functions
 
-def gen_weights(n):
+def gen_weights(sample_size, model = 'Bernoulli'):
     """
     Генерирует веса, которые не суммируются в 0.
     
@@ -112,25 +111,28 @@ def gen_weights(n):
     """
     weights = np.array([0, 0])
     while weights.sum() == 0:
-        weights = 2 * np.random.binomial(n=1, p=0.5, size=n)
+        if model == 'Bernoulli':
+            weights = 2 * np.random.binomial(n=1, p=0.5, size=sample_size)
+        elif model == "Poisson":
+            weights = np.random.poisson(lam=1, size = sample_size)
     return weights
 
-def subsmple(arr_list, sample_size, repl):
+def subsmple(data, sample_size, repl=True):
     """
     Subsample with replacement from a list of numpy arrays.
     
     Parameters:
-    - arr_list: List of numpy arrays.
+    - arr_list: List of numpy arrays.ß
     - sample_size: Number of samples to draw with replacement.
     
     Returns:
     - A list of subsampled numpy arrays
     """
     # Randomly select indices with replacement
-    indices = np.random.choice(len(arr_list), size=sample_size, replace = repl)
+    indices = np.random.choice(len(data), size=sample_size, replace = repl)
     
     # Return the subsampled numpy arrays
-    return [arr_list[i] for i in indices]
+    return [data[i] for i in indices]
 
 def ecdf_on_grid(data, x_grid):
     """Compute the ECDF on a fixed x-grid"""
@@ -166,7 +168,7 @@ def compute_ecdfs(data, grid):
     output = [ecdf_on_grid(curve, grid) for curve in data]
     return output
 
-def compute_KS_stat(true, emp):
-    dummy = [ks_stat_naive(true, i) for i in emp]
+def compute_KS_stat(data_true, data_emp):
+    dummy = [ks_stat_naive(data_true, i) for i in data_emp]
 
     return np.mean(dummy), np.var(dummy)

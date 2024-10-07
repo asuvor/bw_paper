@@ -175,7 +175,7 @@ def Wbarycenter(covs, weights = None, eps = 1e-3, init = None, max_iterations = 
 #------------------------- Bootstrap-----------------------
 
 
-def bootstrap(pop, size, iters, boot_samples):
+def bootstrap(data, size, iters, boot_samples, model, setting):
     """
     Выполняет процедуру бутстрэппинга для вычисления статистики.
     
@@ -185,38 +185,34 @@ def bootstrap(pop, size, iters, boot_samples):
     :param boot_samples: Количество бутстрэп-выборок на итерацию
     :return: Сохранённый файл со статистикой бутстрэппинга
     """
-    boot_stats = []  # Список для хранения результатов бутстрэппинга
+    out = []  # Список для хранения результатов бутстрэппинга
     
-    for it in range(iters):
-        logging.info(f"Итерация {it + 1}/{iters}")
-        iter_stats = []
+    for _ in range(iters):
+        dummy = []
         
         # Генерация подвыборки без замены
-        sample = subsmple(pop, size, repl=False)
+        smple = subsmple(data = data, sample_size = size, repl=True)
         
         # Вычисление центральных элементов для эмпирической выборки
-        emp_bary = Fbarycenter(sample)
-        emp_wass = Wbarycenter(sample, init=emp_bary)
+        emp_f = Fbarycenter(smple)
+        emp_bw = Wbarycenter(smple, init=emp_f)
         
         for _ in range(boot_samples):
             # Генерация весов для бутстрэп-выборки
-            weights = gen_weights(size)
+            weights = gen_weights(size, model = model)
             
             # Вычисление центральных элементов для бутстрэп-выборки
-            boot_bary = Fbarycenter(sample, weights)
-            boot_wass = Wbarycenter(sample, weights, init=boot_bary)
+            boot_f = Fbarycenter(smple, weights)
+            boot_bw = Wbarycenter(smple, weights, init=boot_f)
             
             # Вычисление статистики между эмпирической и бутстрэп-выборкой
-            wass_stat = BW(emp_wass, boot_wass) * np.sqrt(size)
-            iter_stats.append(wass_stat)
+            dummy.append(BW(emp_bw, boot_bw) * np.sqrt(size))
         
-        boot_stats.append(iter_stats)
+        out.append(dummy)
     
-    # Формирование имени файла с использованием f-строки
-    filename = f'stat_bw_boot_d{np.shape(boot_wass)[0]}_n{size}_M{iters}_L_proj.npy'
-    np.save(filename, boot_stats)
-    logging.info(f"Результаты сохранены в файл: {filename}")
-    return boot_stats
+    filename = f'stat_bw_boot_d{np.shape(emp_bw)[0]}_n{size}_M{iters}_L_proj.npy'
+    np.save(setting+filename, out)
+    return out
 
 
 
@@ -436,7 +432,7 @@ def compute_var_T(B, sample, basis):
     var_T /= n
     return var_T
 
-def compute_asymptotic(B, Q, upx, N, basis):
+def compute_asymptotic(B, Q, upx, iters, basis):
     """
     Вычисляет статистику Tt для бутстрэп-выборок.
     
@@ -451,14 +447,14 @@ def compute_asymptotic(B, Q, upx, N, basis):
     stats = []
     d = np.shape(B)[0]
     dim = d * (d + 1) // 2
-    for _ in range(N):
+    for _ in range(iters):
         Z = np.random.normal(0, 1, dim)
         Z = Q @ upx @ Z
         stat_value = np.linalg.norm(sqrtm1(B) @ Reconstruct(Z, basis=basis), 'fro')
         stats.append(stat_value)
     return stats
 
-def asymptotic_statistics(pop, size, iters, boot_samples):
+def asymptotic_statistics(data, size, iters, boot_samples, setting):
     """
     Compute asymptotic distribution.
 
@@ -467,37 +463,55 @@ def asymptotic_statistics(pop, size, iters, boot_samples):
     :param iters: Количество основных итераций
     :param boot_samples: Количество бутстрэп-выборок на итерацию
     """
-    basis = GenONbasis(np.shape(pop[0])[0])
-    stat_asymp = []
+    basis = GenONbasis(np.shape(data[0])[0])
+    out = []
     
-    for m in range(iters):
-        logging.info(f"Итерация {m + 1}/{iters}")
-    
-        
+    for _ in range(iters):
+     
         # Генерация подвыборки без замены
-        sub_sample = subsmple(pop, size, repl=False)
-        frob_emp  = Fbarycenter(sub_sample)
-        bw_emp = Wbarycenter(sub_sample, init=frob_emp)
+        smple = subsmple(data = data, sample_size = size, repl=True)
+        emp_f  = Fbarycenter(smple)
+        emp_bw = Wbarycenter(smple, init=emp_f)
         
     
         # Вычисление dT и var_T
-        dT = compute_EdT(bw_emp, sub_sample, basis)
+        dT = compute_EdT(emp_bw, smple, basis)
         inv_dT = MInv(dT)
-        var_T = compute_var_T(bw_emp, sub_sample, basis)
+        var_T = compute_var_T(emp_bw, smple, basis)
         
         # Вычисление ковариации Uξ
         upxi = inv_dT @ var_T @ inv_dT
         sqrt_upxi = sqrtm1(upxi)
-        Qu = ComputeReprdT(bw_emp, basis=basis)
+        Qu = ComputeReprdT(emp_bw, basis=basis)
         
         # Вычисление статистики Tt
-        stat_rsmp = compute_asymptotic(bw_emp, Qu,  sqrt_upxi, boot_samples, basis)
-        stat_asymp.append(stat_rsmp)
+        stat_rsmp = compute_asymptotic(B = emp_bw, Q = Qu,  upx = sqrt_upxi, iters = boot_samples, basis = basis)
+        out.append(stat_rsmp)
     
-    d = np.shape(bw_emp)[0]
+    d = np.shape(emp_bw)[0]
     # Сохранение результатов
     filename = f'stat_bw_boot_d{d}_n{size}_M{boot_samples}_emp_L_proj.npy'
-    np.save(filename, stat_asymp)
-    logging.info(f"Результаты сохранены в файл: {filename}")
-    return stat_asymp
+    np.save(setting+filename, out)
+    logging.info(f"Результаты сохранены в файл: {setting+filename}")
+    return out
 
+
+
+#------------------------- Compute true dustribution functin ------
+def true_distr(data, size, boot_samples, setting):
+    #Compute ture distribution
+    fm = Fbarycenter(data) #initial point to make the computation faster
+    bw = Wbarycenter(data, init = fm, verbose = True, max_iterations = 10)  # вычисление барицентра
+    out = []
+    for _ in range(boot_samples):
+        smple = subsmple(data = data, sample_size = size, repl=True)
+        emp_f  = Fbarycenter(smple)
+        emp_bw =  Wbarycenter(smple, init = emp_f)
+        out.append(BW(emp_bw, bw) * np.sqrt(size))
+
+    d = np.shape(emp_bw)[0]
+    # Сохранение результатов
+    np.save(setting+'bw_true_d{d}_n{size}_M{boot_samples}_L_proj.npy', out)
+
+    
+    return out
