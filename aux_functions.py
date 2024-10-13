@@ -33,7 +33,7 @@ def genGLFast(mtx, P):
     """
     fill_diagonal(mtx, 0)
     mtx = diagflat(mtx.sum(axis=1)) - mtx
-    mtx = P @ mtx @ P.T
+    mtx = P@ mtx @ P.T
     return(pinv(mtx))
 
 
@@ -175,7 +175,7 @@ def Wbarycenter(covs, weights = None, eps = 1e-3, init = None, max_iterations = 
 #------------------------- Bootstrap-----------------------
 
 
-def bootstrap(data, size, iters, boot_samples, model, setting):
+def bootstrap(data, size, iters, boot_samples, model, setting, replace = True):
     """
     Выполняет процедуру бутстрэппинга для вычисления статистики.
     
@@ -191,7 +191,7 @@ def bootstrap(data, size, iters, boot_samples, model, setting):
         dummy = []
         
         # Генерация подвыборки без замены
-        smple = subsmple(data = data, sample_size = size, repl=True)
+        smple = subsmple(data = data, sample_size = size, repl=replace)
         
         # Вычисление центральных элементов для эмпирической выборки
         emp_f = Fbarycenter(smple)
@@ -450,11 +450,11 @@ def compute_asymptotic(B, Q, upx, iters, basis):
     for _ in range(iters):
         Z = np.random.normal(0, 1, dim)
         Z = Q @ upx @ Z
-        stat_value = np.linalg.norm(sqrtm1(B) @ Reconstruct(Z, basis=basis), 'fro')
+        stat_value = np.linalg.norm(B @ Reconstruct(Z, basis=basis), 'fro')
         stats.append(stat_value)
     return stats
 
-def asymptotic_statistics(data, size, iters, boot_samples, setting):
+def asymptotic_statistics(data, size, iters, boot_samples, setting, replace = True):
     """
     Compute asymptotic distribution.
 
@@ -468,8 +468,8 @@ def asymptotic_statistics(data, size, iters, boot_samples, setting):
     
     for _ in range(iters):
      
-        # Генерация подвыборки без замены
-        smple = subsmple(data = data, sample_size = size, repl=True)
+        # Генерация подвыборки 
+        smple = subsmple(data = data, sample_size = size, repl=replace)
         emp_f  = Fbarycenter(smple)
         emp_bw = Wbarycenter(smple, init=emp_f)
         
@@ -483,9 +483,10 @@ def asymptotic_statistics(data, size, iters, boot_samples, setting):
         upxi = inv_dT @ var_T @ inv_dT
         sqrt_upxi = sqrtm1(upxi)
         Qu = ComputeReprdT(emp_bw, basis=basis)
+        sqrt_B = sqrtm1(emp_bw)
         
         # Вычисление статистики Tt
-        stat_rsmp = compute_asymptotic(B = emp_bw, Q = Qu,  upx = sqrt_upxi, iters = boot_samples, basis = basis)
+        stat_rsmp = compute_asymptotic(B = sqrt_B, Q = Qu,  upx = sqrt_upxi, iters = boot_samples, basis = basis)
         out.append(stat_rsmp)
     
     d = np.shape(emp_bw)[0]
@@ -498,20 +499,21 @@ def asymptotic_statistics(data, size, iters, boot_samples, setting):
 
 
 #------------------------- Compute true dustribution functin ------
-def true_distr(data, size, boot_samples, setting):
+def true_distr(data, size, boot_samples, setting, replace = True):
     #Compute ture distribution
     fm = Fbarycenter(data) #initial point to make the computation faster
     bw = Wbarycenter(data, init = fm, verbose = True, max_iterations = 10)  # вычисление барицентра
     out = []
     for _ in range(boot_samples):
-        smple = subsmple(data = data, sample_size = size, repl=True)
+        smple = subsmple(data = data, sample_size = size, repl=replace)
         emp_f  = Fbarycenter(smple)
         emp_bw =  Wbarycenter(smple, init = emp_f)
         out.append(BW(emp_bw, bw) * np.sqrt(size))
 
     d = np.shape(emp_bw)[0]
     # Сохранение результатов
-    np.save(setting+'bw_true_d{d}_n{size}_M{boot_samples}_L_proj.npy', out)
+    filename = f'bw_true_d{d}_n{size}_M{boot_samples}_L_proj.npy'
+    np.save(setting+filename, out)
 
     
     return out
